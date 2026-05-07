@@ -186,11 +186,15 @@ def fetch_cheapest_flight(origin: str, destination: str, depart_date: date, retu
 # ── メール通知 ────────────────────────────────────────────────────────────────
 
 def _build_smtp():
+    import socket
     smtp_host = os.environ.get("SMTP_HOST", "smtp.gmail.com")
     smtp_port = int(os.environ.get("SMTP_PORT", 587))
     smtp_user = os.environ["SMTP_USER"]
     smtp_pass = os.environ["SMTP_PASS"]
-    server = smtplib.SMTP(smtp_host, smtp_port)
+    # IPv4 を明示して接続（IPv6 非対応環境向け）
+    ipv4 = socket.getaddrinfo(smtp_host, smtp_port, socket.AF_INET)[0][4]
+    server = smtplib.SMTP()
+    server.connect(ipv4[0], ipv4[1])
     server.starttls()
     server.login(smtp_user, smtp_pass)
     return server, smtp_user
