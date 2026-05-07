@@ -85,6 +85,20 @@ def get_historic_low(origin, destination, depart_date, return_date):
     return row[0] if row and row[0] else None
 
 
+def get_price_stats(origin, destination, depart_date, return_date) -> dict:
+    """底値・平均・サンプル数を返す。データなしは None。"""
+    with sqlite3.connect(DB_PATH) as conn:
+        row = conn.execute(
+            """SELECT MIN(price_jpy), AVG(price_jpy), COUNT(*)
+               FROM price_history
+               WHERE origin=? AND destination=? AND depart_date=? AND return_date=?""",
+            (origin, destination, depart_date.isoformat(), return_date.isoformat()),
+        ).fetchone()
+    if not row or not row[2]:
+        return {"low": None, "avg": None, "count": 0}
+    return {"low": row[0], "avg": round(row[1]), "count": row[2]}
+
+
 # ── スケジュール最適化 ─────────────────────────────────────────────────────────
 
 def analyze_best_check_times() -> tuple[str, str]:
@@ -197,22 +211,87 @@ def _build_smtp():
     return server, smtp_user
 
 
+def _deal_rows_html(deals: list[dict]) -> str:
+    def fmt_stats(stats: dict) -> str:
+        low = f"¥{stats['low']:,}" if stats.get("low") else "—"
+        avg = f"¥{stats['avg']:,}" if stats.get("avg") else "—"
+        return low, avg
+
+    rows = ""
+    for d in deals:
+        low, avg = fmt_stats(d.get("stats", {}))
+        is_low = d.get("stats", {}).get("low") and d["price_jpy"] <= d["stats"]["low"]
+        price_cell = (
+            f"<td style='color:{'red' if is_low else 'green'};font-weight:bold'>"
+            f"¥{d['price_jpy']:,}{'&nbsp;★' if is_low else ''}</td>"
+        )
+        rows += (
+            f"<tr>"
+            f"<td>{d['depart_date']}</td>"
+            f"<td>{d['return_date']}</td>"
+            f"<td>{d['nights']}泊</td>"
+            f"{price_cell}"
+            f"<td>{low}</td>"
+            f"<td>{avg}</td>"
+            f"<td>{d['airline']}</td>"
+            f"<td><a href='{d['deep_link']}'>検索</a></td>"
+            f"</tr>"
+        )
+    return rows
+
+
+def _email_table(rows_html: str, threshold: int) -> str:
+    return (
+        "<html><body style='font-family:sans-serif'>"
+        "<h2>✈️ ソウル格安便が見つかりました</h2>"
+        f"<p>設定閾値: <strong>¥{threshold:,}</strong> 以下　"
+        f"<span style='color:red'>★ = 過去最安値</span></p>"
+        "<table border='1' cellpadding='6' cellspacing='0' style='border-collapse:collapse;font-size:14px'>"
+        "<thead style='background:#f0f0f0'><tr>"
+        "<th>出発日</th><th>帰国日</th><th>泊数</th>"
+        "<th>現在価格</th><th>底値</th><th>平均価格</th>"
+        "<th>航空会社</th><th>リンク</th>"
+        f"</tr></thead><tbody>{rows_html}</tbody></table>"
+        "<p style='color:gray;font-size:11px;margin-top:16px'>"
+        "底値・平均は本ツールの計測開始以降の履歴に基づきます。"
+        "Seoul Flight Checker が自動送信しました</p>"
+        "</body></html>"
+    )
+
+
 def send_test_email():
-    alert_to = os.environ["ALERT_TO"]
+    alert_to  = os.environ["ALERT_TO"]
     smtp_user = os.environ["SMTP_USER"]
+    threshold = int(os.environ.get("PRICE_THRESHOLD", 50000))
+
+    # 実際のアラートメールと同じレイアウトでサンプルデータを表示
+    sample_deals = [
+        {
+            "depart_date": "2026-07-04", "return_date": "2026-07-08",
+            "nights": 4, "price_jpy": 38500, "airline": "Jeju Air",
+            "deep_link": "https://www.google.com/travel/flights",
+            "stats": {"low": 38500, "avg": 45200, "count": 12},
+        },
+        {
+            "depart_date": "2026-07-11", "return_date": "2026-07-14",
+            "nights": 3, "price_jpy": 42000, "airline": "T'way Air",
+            "deep_link": "https://www.google.com/travel/flights",
+            "stats": {"low": 41000, "avg": 47800, "count": 8},
+        },
+    ]
+    rows = _deal_rows_html(sample_deals)
+    body_html = (
+        "<html><body style='font-family:sans-serif'>"
+        "<h2>✈️ Seoul Flight Checker — 接続テスト</h2>"
+        "<p>メール通知の設定は正常です。実際のアラートはこのような形式で届きます（以下はサンプルデータ）。</p>"
+        + _email_table(rows, threshold).replace("<html><body style='font-family:sans-serif'>", "")
+    )
 
     msg = MIMEMultipart("alternative")
-    msg["Subject"] = "✈️ Seoul Flight Checker — 接続テスト"
+    msg["Subject"] = "✈️ Seoul Flight Checker — 接続テスト（サンプル付き）"
     msg["From"]    = smtp_user
     msg["To"]      = alert_to
-    msg.attach(MIMEText(
-        "<html><body>"
-        "<h2>✈️ Seoul Flight Checker テストメール</h2>"
-        "<p>メール通知の設定が正しく完了しています。</p>"
-        "<p style='color:gray;font-size:12px'>このメールは <code>--test</code> オプションで送信されました</p>"
-        "</body></html>",
-        "html", "utf-8",
-    ))
+    msg.attach(MIMEText(body_html, "html", "utf-8"))
 
     server, smtp_user = _build_smtp()
     try:
@@ -227,31 +306,8 @@ def send_alert_email(deals: list[dict]):
     threshold = int(os.environ.get("PRICE_THRESHOLD", 50000))
 
     subject = f"✈️ ソウル格安便アラート！ {len(deals)}件 ¥{threshold:,}以下"
-
-    rows = "".join(
-        f"<tr>"
-        f"<td>{d['depart_date']}</td>"
-        f"<td>{d['return_date']}</td>"
-        f"<td>{d['nights']}泊</td>"
-        f"<td style='color:green;font-weight:bold'>¥{d['price_jpy']:,}</td>"
-        f"<td>{d['airline']}</td>"
-        f"<td><a href='{d['deep_link']}'>検索</a></td>"
-        f"</tr>"
-        for d in deals
-    )
-
-    body_html = (
-        "<html><body>"
-        "<h2>✈️ ソウル格安便が見つかりました</h2>"
-        f"<p>設定閾値: <strong>¥{threshold:,}</strong> 以下</p>"
-        "<table border='1' cellpadding='6' style='border-collapse:collapse'>"
-        "<thead><tr>"
-        "<th>出発日</th><th>帰国日</th><th>泊数</th>"
-        "<th>価格(往復)</th><th>航空会社</th><th>リンク</th>"
-        f"</tr></thead><tbody>{rows}</tbody></table>"
-        "<p style='color:gray;font-size:12px'>Seoul Flight Checker が自動送信しました</p>"
-        "</body></html>"
-    )
+    rows    = _deal_rows_html(deals)
+    body_html = _email_table(rows, threshold)
 
     msg = MIMEMultipart("alternative")
     msg["Subject"] = subject
@@ -296,15 +352,15 @@ def run_check():
 
             save_price(origin, DESTINATION, depart, ret, price, airline, deep_link)
 
-            historic_low = get_historic_low(origin, DESTINATION, depart, ret)
-            is_new_low   = historic_low and price < historic_low
+            stats       = get_price_stats(origin, DESTINATION, depart, ret)
+            is_new_low  = stats["low"] and price < stats["low"]
 
             flag = " ★最安値更新!" if is_new_low else ""
             log.info("  %s → %s (%d泊) ¥%s [%s]%s",
                      depart, ret, nights, f"{price:,}", airline, flag)
 
             if price <= threshold:
-                deals_found.append({**result, "nights": nights})
+                deals_found.append({**result, "nights": nights, "stats": stats})
 
     if deals_found:
         log.info("閾値以下の便が %d 件見つかりました。", len(deals_found))
