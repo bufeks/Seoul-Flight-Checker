@@ -5,12 +5,13 @@ SerpAPI (Google Flights) を使って東京↔ソウルの最安値を定期チ�
 閾値を下回ったらメールで通知する。
 """
 
-import json
+import argparse
 import logging
 import os
 import smtplib
 import sqlite3
-from datetime import date, timedelta
+from collections import defaultdict
+from datetime import date, datetime, timedelta
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 
@@ -33,6 +34,15 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 DB_PATH = "prices.db"
+DESTINATION = "SEL"  # ソウル固定 (ICN/GMP)
+
+# 蓄積データが少ない間のデフォルト時刻
+# - 07:00: 前夜の需要変動をキャプチャ（LCCは深夜バッチで価格更新することが多い）
+# - 21:00: 当日の販売状況を反映した夕方以降の調整をキャプチャ
+DEFAULT_CHECK_TIMES = ("07:00", "21:00")
+
+# 自動調整に必要な最低チェック回数（約2週間分）
+MIN_SAMPLES_FOR_ADAPTATION = 28
 
 
 # ── DB ──────────────────────────────────────────────────────────────────────
@@ -78,10 +88,60 @@ def get_historic_low(origin, destination, depart_date, return_date):
     return row[0] if row and row[0] else None
 
 
+# ── スケジュール最適化 ─────────────────────────────────────────────────────────
+
+def analyze_best_check_times() -> tuple[str, str]:
+    """
+    蓄積した価格履歴から「価格が最も下落した時間帯」を2つ選んで返す。
+    データ不足時はデフォルト値を返す。
+
+    手法: 同一フライト(出発日・帰着日)の連続チェック間の価格差分を時間帯別に集計し、
+    下落幅の合計が最大だった上位2時間を選ぶ。
+    """
+    with sqlite3.connect(DB_PATH) as conn:
+        rows = conn.execute("""
+            SELECT checked_at, depart_date, return_date, price_jpy
+            FROM price_history
+            ORDER BY depart_date, return_date, checked_at
+        """).fetchall()
+
+    if len(rows) < MIN_SAMPLES_FOR_ADAPTATION:
+        log.info("データが少ないためデフォルト時刻を使用 (%d/%d サンプル)",
+                 len(rows), MIN_SAMPLES_FOR_ADAPTATION)
+        return DEFAULT_CHECK_TIMES
+
+    # 同一フライトの連続レコードを比較して、各時間帯の「平均価格下落幅」を集計
+    drop_by_hour: dict[int, list[int]] = defaultdict(list)
+    by_flight: dict[tuple, list] = defaultdict(list)
+    for checked_at, depart_date, return_date, price in rows:
+        by_flight[(depart_date, return_date)].append((checked_at, price))
+
+    for records in by_flight.values():
+        records.sort()
+        for i in range(1, len(records)):
+            prev_time, prev_price = records[i - 1]
+            curr_time, curr_price = records[i]
+            drop = prev_price - curr_price          # 正値 = 価格下落
+            if drop > 0:
+                hour = datetime.fromisoformat(curr_time).hour
+                drop_by_hour[hour].append(drop)
+
+    if not drop_by_hour:
+        return DEFAULT_CHECK_TIMES
+
+    # 各時間帯の平均下落幅で降順ソートし、上位2時間を選ぶ
+    ranked = sorted(drop_by_hour.items(), key=lambda x: sum(x[1]) / len(x[1]), reverse=True)
+    top2_hours = sorted(h for h, _ in ranked[:2])
+
+    times = tuple(f"{h:02d}:00" for h in top2_hours)
+    log.info("最適チェック時刻を算出: %s (分析対象フライト数: %d)", " / ".join(times), len(by_flight))
+    return times  # type: ignore[return-value]
+
+
 # ── SerpAPI ─────────────────────────────────────────────────────────────────
 
 def fetch_cheapest_flight(origin: str, destination: str, depart_date: date, return_date: date) -> dict | None:
-    """Google Flights で往復最安値を 1 件返す。見つからなければ None。"""
+    """Google Flights で往復最安値を1件返す。見つからなければ None。"""
     params = {
         "engine": "google_flights",
         "departure_id": origin,
@@ -125,70 +185,96 @@ def fetch_cheapest_flight(origin: str, destination: str, depart_date: date, retu
 
 # ── メール通知 ────────────────────────────────────────────────────────────────
 
-def send_alert_email(deals: list[dict]):
+def _build_smtp():
     smtp_host = os.environ.get("SMTP_HOST", "smtp.gmail.com")
     smtp_port = int(os.environ.get("SMTP_PORT", 587))
     smtp_user = os.environ["SMTP_USER"]
     smtp_pass = os.environ["SMTP_PASS"]
+    server = smtplib.SMTP(smtp_host, smtp_port)
+    server.starttls()
+    server.login(smtp_user, smtp_pass)
+    return server, smtp_user
+
+
+def send_test_email():
+    alert_to = os.environ["ALERT_TO"]
+    smtp_user = os.environ["SMTP_USER"]
+
+    msg = MIMEMultipart("alternative")
+    msg["Subject"] = "✈️ Seoul Flight Checker — 接続テスト"
+    msg["From"]    = smtp_user
+    msg["To"]      = alert_to
+    msg.attach(MIMEText(
+        "<html><body>"
+        "<h2>✈️ Seoul Flight Checker テストメール</h2>"
+        "<p>メール通知の設定が正しく完了しています。</p>"
+        "<p style='color:gray;font-size:12px'>このメールは <code>--test</code> オプションで送信されました</p>"
+        "</body></html>",
+        "html", "utf-8",
+    ))
+
+    server, smtp_user = _build_smtp()
+    try:
+        server.sendmail(smtp_user, [alert_to], msg.as_string())
+        log.info("テストメールを %s に送信しました", alert_to)
+    finally:
+        server.quit()
+
+
+def send_alert_email(deals: list[dict]):
     alert_to  = os.environ["ALERT_TO"]
     threshold = int(os.environ.get("PRICE_THRESHOLD", 50000))
 
     subject = f"✈️ ソウル格安便アラート！ {len(deals)}件 ¥{threshold:,}以下"
 
-    rows = ""
-    for d in deals:
-        rows += (
-            f"<tr>"
-            f"<td>{d['depart_date']}</td>"
-            f"<td>{d['return_date']}</td>"
-            f"<td>{d['nights']}泊</td>"
-            f"<td style='color:green;font-weight:bold'>¥{d['price_jpy']:,}</td>"
-            f"<td>{d['airline']}</td>"
-            f"<td><a href='{d['deep_link']}'>検索</a></td>"
-            f"</tr>"
-        )
+    rows = "".join(
+        f"<tr>"
+        f"<td>{d['depart_date']}</td>"
+        f"<td>{d['return_date']}</td>"
+        f"<td>{d['nights']}泊</td>"
+        f"<td style='color:green;font-weight:bold'>¥{d['price_jpy']:,}</td>"
+        f"<td>{d['airline']}</td>"
+        f"<td><a href='{d['deep_link']}'>検索</a></td>"
+        f"</tr>"
+        for d in deals
+    )
 
-    body_html = f"""
-    <html><body>
-    <h2>✈️ ソウル格安便が見つかりました</h2>
-    <p>設定閾値: <strong>¥{threshold:,}</strong> 以下</p>
-    <table border="1" cellpadding="6" style="border-collapse:collapse">
-      <thead><tr>
-        <th>出発日</th><th>帰国日</th><th>泊数</th>
-        <th>価格(往復)</th><th>航空会社</th><th>リンク</th>
-      </tr></thead>
-      <tbody>{rows}</tbody>
-    </table>
-    <p style="color:gray;font-size:12px">Seoul Flight Checker が自動送信しました</p>
-    </body></html>
-    """
+    body_html = (
+        "<html><body>"
+        "<h2>✈️ ソウル格安便が見つかりました</h2>"
+        f"<p>設定閾値: <strong>¥{threshold:,}</strong> 以下</p>"
+        "<table border='1' cellpadding='6' style='border-collapse:collapse'>"
+        "<thead><tr>"
+        "<th>出発日</th><th>帰国日</th><th>泊数</th>"
+        "<th>価格(往復)</th><th>航空会社</th><th>リンク</th>"
+        f"</tr></thead><tbody>{rows}</tbody></table>"
+        "<p style='color:gray;font-size:12px'>Seoul Flight Checker が自動送信しました</p>"
+        "</body></html>"
+    )
 
     msg = MIMEMultipart("alternative")
     msg["Subject"] = subject
-    msg["From"]    = smtp_user
+    msg["From"]    = os.environ["SMTP_USER"]
     msg["To"]      = alert_to
     msg.attach(MIMEText(body_html, "html", "utf-8"))
 
+    server, smtp_user = _build_smtp()
     try:
-        with smtplib.SMTP(smtp_host, smtp_port) as server:
-            server.starttls()
-            server.login(smtp_user, smtp_pass)
-            server.sendmail(smtp_user, [alert_to], msg.as_string())
+        server.sendmail(smtp_user, [alert_to], msg.as_string())
         log.info("Alert email sent to %s (%d deals)", alert_to, len(deals))
     except Exception as exc:
         log.error("Failed to send email: %s", exc)
+    finally:
+        server.quit()
 
 
 # ── メインチェック ────────────────────────────────────────────────────────────
 
-DESTINATION = "SEL"  # ソウル固定 (ICN/GMP)
-
-
 def run_check():
-    origin     = os.environ.get("ORIGIN", "TYO")
+    origin    = os.environ.get("ORIGIN", "TYO")
     days_ahead = int(os.environ.get("DAYS_AHEAD", 90))
-    threshold   = int(os.environ.get("PRICE_THRESHOLD", 50000))
-    durations   = [int(d) for d in os.environ.get("TRIP_DURATIONS", "3,4,5,7").split(",")]
+    threshold  = int(os.environ.get("PRICE_THRESHOLD", 50000))
+    durations  = [int(d) for d in os.environ.get("TRIP_DURATIONS", "3,4,5,7").split(",")]
 
     today = date.today()
     deals_found = []
@@ -203,14 +289,14 @@ def run_check():
             if result is None:
                 continue
 
-            price = result["price_jpy"]
-            airline = result["airline"]
+            price     = result["price_jpy"]
+            airline   = result["airline"]
             deep_link = result["deep_link"]
 
             save_price(origin, DESTINATION, depart, ret, price, airline, deep_link)
 
             historic_low = get_historic_low(origin, DESTINATION, depart, ret)
-            is_new_low = historic_low and price < historic_low
+            is_new_low   = historic_low and price < historic_low
 
             flag = " ★最安値更新!" if is_new_low else ""
             log.info("  %s → %s (%d泊) ¥%s [%s]%s",
@@ -230,17 +316,25 @@ def run_check():
 
 # ── エントリーポイント ──────────────────────────────────────────────────────────
 
-CHECK_TIMES = ("08:00", "20:00")  # 1日2回チェック
-
-
 def main():
-    _validate_env()
+    parser = argparse.ArgumentParser(description="Seoul Flight Price Checker")
+    parser.add_argument("--test", action="store_true",
+                        help="メール設定の疎通確認用テストメールを送信して終了")
+    args = parser.parse_args()
+
+    _validate_env(require_serpapi=not args.test)
     init_db()
 
-    log.info("Seoul Flight Checker 起動 (毎日 %s)", " / ".join(CHECK_TIMES))
+    if args.test:
+        send_test_email()
+        return
+
+    # データ量に応じてチェック時刻を動的に決定
+    check_times = analyze_best_check_times()
+    log.info("Seoul Flight Checker 起動 (毎日 %s)", " / ".join(check_times))
     run_check()  # 起動直後に即実行
 
-    for t in CHECK_TIMES:
+    for t in check_times:
         schedule.every().day.at(t).do(run_check)
 
     while True:
@@ -248,12 +342,16 @@ def main():
         time.sleep(30)
 
 
-def _validate_env():
-    required = ["SERPAPI_KEY", "SMTP_USER", "SMTP_PASS", "ALERT_TO"]
+def _validate_env(require_serpapi: bool = True):
+    required = ["SMTP_USER", "SMTP_PASS", "ALERT_TO"]
+    if require_serpapi:
+        required.append("SERPAPI_KEY")
     missing = [k for k in required if not os.environ.get(k)]
     if missing:
-        raise SystemExit(f"必須の環境変数が未設定です: {', '.join(missing)}\n"
-                         f".env.example を参考に .env ファイルを作成してください。")
+        raise SystemExit(
+            f"必須の環境変数が未設定です: {', '.join(missing)}\n"
+            f".env.example を参考に .env ファイルを作成してください。"
+        )
 
 
 if __name__ == "__main__":
