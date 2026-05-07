@@ -18,8 +18,8 @@ from email.mime.text import MIMEText
 import schedule
 import time
 
+import serpapi
 from dotenv import load_dotenv
-from serpapi import GoogleSearch
 
 load_dotenv()
 
@@ -155,7 +155,7 @@ def fetch_cheapest_flight(origin: str, destination: str, depart_date: date, retu
         "api_key": os.environ["SERPAPI_KEY"],
     }
     try:
-        results = GoogleSearch(params).get_dict()
+        results = serpapi.search(params)
     except Exception as exc:
         log.error("SerpAPI error: %s", exc)
         return None
@@ -306,8 +306,11 @@ def run_check():
                 deals_found.append({**result, "nights": nights})
 
     if deals_found:
-        log.info("閾値以下の便が %d 件見つかりました。メール送信します。", len(deals_found))
-        send_alert_email(deals_found)
+        log.info("閾値以下の便が %d 件見つかりました。", len(deals_found))
+        if _email_configured():
+            send_alert_email(deals_found)
+        else:
+            log.warning("メール未設定のため通知をスキップ。.env に SMTP_USER/SMTP_PASS/ALERT_TO を追加してください。")
     else:
         log.info("閾値以下の便は見つかりませんでした。")
 
@@ -342,10 +345,17 @@ def main():
         time.sleep(30)
 
 
+def _email_configured() -> bool:
+    return all(os.environ.get(k) for k in ("SMTP_USER", "SMTP_PASS", "ALERT_TO"))
+
+
 def _validate_env(require_serpapi: bool = True):
-    required = ["SMTP_USER", "SMTP_PASS", "ALERT_TO"]
+    required = []
     if require_serpapi:
         required.append("SERPAPI_KEY")
+    else:
+        # --test モードはメール設定が必須
+        required += ["SMTP_USER", "SMTP_PASS", "ALERT_TO"]
     missing = [k for k in required if not os.environ.get(k)]
     if missing:
         raise SystemExit(
