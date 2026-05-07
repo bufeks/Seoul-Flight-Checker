@@ -181,23 +181,25 @@ def send_alert_email(deals: list[dict]):
 
 # ── メインチェック ────────────────────────────────────────────────────────────
 
+DESTINATION = "SEL"  # ソウル固定 (ICN/GMP)
+
+
 def run_check():
-    origin      = os.environ.get("ORIGIN", "TYO")
-    destination = os.environ.get("DESTINATION", "SEL")
-    days_ahead  = int(os.environ.get("DAYS_AHEAD", 90))
+    origin     = os.environ.get("ORIGIN", "TYO")
+    days_ahead = int(os.environ.get("DAYS_AHEAD", 90))
     threshold   = int(os.environ.get("PRICE_THRESHOLD", 50000))
     durations   = [int(d) for d in os.environ.get("TRIP_DURATIONS", "3,4,5,7").split(",")]
 
     today = date.today()
     deals_found = []
 
-    log.info("=== チェック開始: %s → %s (閾値 ¥%s) ===", origin, destination, f"{threshold:,}")
+    log.info("=== チェック開始: %s → %s (閾値 ¥%s) ===", origin, DESTINATION, f"{threshold:,}")
 
     for days_out in range(7, days_ahead + 1, 7):          # 1週間刻みで検索
         depart = today + timedelta(days=days_out)
         for nights in durations:
             ret = depart + timedelta(days=nights)
-            result = fetch_cheapest_flight(origin, destination, depart, ret)
+            result = fetch_cheapest_flight(origin, DESTINATION, depart, ret)
             if result is None:
                 continue
 
@@ -205,9 +207,9 @@ def run_check():
             airline = result["airline"]
             deep_link = result["deep_link"]
 
-            save_price(origin, destination, depart, ret, price, airline, deep_link)
+            save_price(origin, DESTINATION, depart, ret, price, airline, deep_link)
 
-            historic_low = get_historic_low(origin, destination, depart, ret)
+            historic_low = get_historic_low(origin, DESTINATION, depart, ret)
             is_new_low = historic_low and price < historic_low
 
             flag = " ★最安値更新!" if is_new_low else ""
@@ -228,16 +230,19 @@ def run_check():
 
 # ── エントリーポイント ──────────────────────────────────────────────────────────
 
+CHECK_TIMES = ("08:00", "20:00")  # 1日2回チェック
+
+
 def main():
     _validate_env()
     init_db()
 
-    interval = int(os.environ.get("CHECK_INTERVAL_MINUTES", 60))
+    log.info("Seoul Flight Checker 起動 (毎日 %s)", " / ".join(CHECK_TIMES))
+    run_check()  # 起動直後に即実行
 
-    log.info("Seoul Flight Checker 起動 (チェック間隔: %d 分)", interval)
-    run_check()                                     # 起動直後に即実行
+    for t in CHECK_TIMES:
+        schedule.every().day.at(t).do(run_check)
 
-    schedule.every(interval).minutes.do(run_check)
     while True:
         schedule.run_pending()
         time.sleep(30)
