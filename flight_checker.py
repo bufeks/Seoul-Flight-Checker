@@ -15,9 +15,6 @@ from datetime import date, datetime, timedelta
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 
-import schedule
-import time
-
 import serpapi
 from dotenv import load_dotenv
 
@@ -336,17 +333,10 @@ def main():
         send_test_email()
         return
 
-    # データ量に応じてチェック時刻を動的に決定
+    # 最適チェック時刻をログに記録（参考情報）
     check_times = analyze_best_check_times()
-    log.info("Seoul Flight Checker 起動 (毎日 %s)", " / ".join(check_times))
-    run_check()  # 起動直後に即実行
-
-    for t in check_times:
-        schedule.every().day.at(t).do(run_check)
-
-    while True:
-        schedule.run_pending()
-        time.sleep(30)
+    log.info("Seoul Flight Checker 起動 (推奨チェック時刻: %s)", " / ".join(check_times))
+    run_check()
 
 
 def _email_configured() -> bool:

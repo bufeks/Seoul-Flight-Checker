@@ -1,0 +1,50 @@
+name: Seoul Flight Price Check
+
+on:
+  schedule:
+    - cron: "0 22 * * *"   # 毎日 07:00 JST (UTC 22:00)
+    - cron: "0 12 * * *"   # 毎日 21:00 JST (UTC 12:00)
+  workflow_dispatch:         # 手動実行ボタン
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Restore price history DB
+        uses: actions/cache@v4
+        with:
+          path: prices.db
+          key: prices-db-${{ github.run_id }}
+          restore-keys: |
+            prices-db-
+
+      - name: Run flight check
+        env:
+          SERPAPI_KEY:      ${{ secrets.SERPAPI_KEY }}
+          SMTP_USER:        ${{ secrets.SMTP_USER }}
+          SMTP_PASS:        ${{ secrets.SMTP_PASS }}
+          ALERT_TO:         ${{ secrets.ALERT_TO }}
+          PRICE_THRESHOLD:  ${{ vars.PRICE_THRESHOLD || '50000' }}
+          DAYS_AHEAD:       ${{ vars.DAYS_AHEAD || '90' }}
+          TRIP_DURATIONS:   ${{ vars.TRIP_DURATIONS || '3,4,5,7' }}
+        run: python flight_checker.py
+
+      - name: Upload log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: flight-log-${{ github.run_number }}
+          path: flight_checker.log
+          retention-days: 7
