@@ -5,6 +5,11 @@ on:
     - cron: "0 22 * * *"   # 毎日 07:00 JST (UTC 22:00)
     - cron: "0 12 * * *"   # 毎日 21:00 JST (UTC 12:00)
   workflow_dispatch:         # 手動実行ボタン
+    inputs:
+      send_test_email:
+        description: 'テストメールを送信する'
+        type: boolean
+        default: false
 
 jobs:
   check:
@@ -30,7 +35,16 @@ jobs:
           restore-keys: |
             prices-db-
 
+      - name: Send test email
+        if: ${{ inputs.send_test_email == true }}
+        env:
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASS: ${{ secrets.SMTP_PASS }}
+          ALERT_TO:  ${{ secrets.ALERT_TO }}
+        run: python flight_checker.py --test
+
       - name: Run flight check
+        if: ${{ inputs.send_test_email != true }}
         env:
           SERPAPI_KEY:      ${{ secrets.SERPAPI_KEY }}
           SMTP_USER:        ${{ secrets.SMTP_USER }}
