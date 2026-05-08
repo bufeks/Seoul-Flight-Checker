@@ -206,7 +206,7 @@ def _build_smtp():
     ipv4 = socket.getaddrinfo(smtp_host, smtp_port, socket.AF_INET)[0][4]
     server = smtplib.SMTP()
     server.connect(ipv4[0], ipv4[1])
-    server.starttls()
+    server.starttls(server_hostname=smtp_host)
     server.login(smtp_user, smtp_pass)
     return server, smtp_user
 
