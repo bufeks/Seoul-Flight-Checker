@@ -41,6 +41,15 @@ DEFAULT_CHECK_TIMES = ("07:00", "21:00")
 # 自動調整に必要な最低チェック回数（約2週間分）
 MIN_SAMPLES_FOR_ADAPTATION = 28
 
+# 価格履歴の保持期間
+HISTORY_DAYS = 365
+
+PRICE_LEVEL_LABEL = {
+    "low":     "🟢 割安",
+    "typical": "🟡 標準",
+    "high":    "🔴 割高",
+}
+
 
 # ── DB ──────────────────────────────────────────────────────────────────────
 
@@ -83,6 +92,16 @@ def get_historic_low(origin, destination, depart_date, return_date):
             (origin, destination, depart_date.isoformat(), return_date.isoformat()),
         ).fetchone()
     return row[0] if row and row[0] else None
+
+
+def cleanup_old_records():
+    """HISTORY_DAYS より古い価格履歴を削除する。"""
+    cutoff = (datetime.now() - timedelta(days=HISTORY_DAYS)).isoformat()
+    with sqlite3.connect(DB_PATH) as conn:
+        cur = conn.execute("DELETE FROM price_history WHERE checked_at < ?", (cutoff,))
+        if cur.rowcount:
+            log.info("古い価格履歴を %d 件削除しました（%d日超）", cur.rowcount, HISTORY_DAYS)
+        conn.commit()
 
 
 def get_price_stats(origin, destination, depart_date, return_date) -> dict:
@@ -182,15 +201,31 @@ def fetch_cheapest_flight(origin: str, destination: str, depart_date: date, retu
     if price is None:
         return None
 
-    airline = (cheapest.get("flights") or [{}])[0].get("airline", "不明")
+    airline   = (cheapest.get("flights") or [{}])[0].get("airline", "不明")
     deep_link = results.get("search_metadata", {}).get("google_flights_url", "")
 
+    # Google Flights の価格インサイト
+    insights      = results.get("price_insights", {})
+    price_level   = insights.get("price_level", "")          # "low" / "typical" / "high"
+    typical_range = insights.get("typical_price_range", [])  # [min, max]
+
+    # セール・プロモーションタグ（flight extensions から抽出）
+    sale_kws = {"sale", "promo", "deal", "special", "セール", "特価", "割引"}
+    promo_tags = [
+        ext for f in (cheapest.get("flights") or [])
+        for ext in (f.get("extensions") or [])
+        if any(kw in ext.lower() for kw in sale_kws)
+    ]
+
     return {
-        "price_jpy": int(price),
-        "airline": airline,
-        "deep_link": deep_link,
-        "depart_date": depart_date,
-        "return_date": return_date,
+        "price_jpy":    int(price),
+        "airline":      airline,
+        "deep_link":    deep_link,
+        "depart_date":  depart_date,
+        "return_date":  return_date,
+        "price_level":  price_level,
+        "typical_range": typical_range,
+        "promo_tags":   promo_tags,
     }
 
 
@@ -213,28 +248,42 @@ def _build_smtp():
 
 
 def _deal_rows_html(deals: list[dict]) -> str:
-    def fmt_stats(stats: dict) -> str:
-        low = f"¥{stats['low']:,}" if stats.get("low") else "—"
-        avg = f"¥{stats['avg']:,}" if stats.get("avg") else "—"
-        return low, avg
-
     rows = ""
     for d in deals:
-        low, avg = fmt_stats(d.get("stats", {}))
-        is_low = d.get("stats", {}).get("low") and d["price_jpy"] <= d["stats"]["low"]
-        price_cell = (
-            f"<td style='color:{'red' if is_low else 'green'};font-weight:bold'>"
-            f"¥{d['price_jpy']:,}{'&nbsp;★' if is_low else ''}</td>"
+        stats = d.get("stats", {})
+        low   = f"¥{stats['low']:,}" if stats.get("low") else "—"
+        avg   = f"¥{stats['avg']:,}" if stats.get("avg") else "—"
+
+        is_hist_low = stats.get("low") and d["price_jpy"] <= stats["low"]
+        price_color = "red" if is_hist_low else "green"
+        price_cell  = (
+            f"<td style='color:{price_color};font-weight:bold'>"
+            f"¥{d['price_jpy']:,}{'&nbsp;★' if is_hist_low else ''}</td>"
         )
+
+        # Google Flights 価格レベル
+        level_label = PRICE_LEVEL_LABEL.get(d.get("price_level", ""), "")
+
+        # 典型価格帯
+        tr = d.get("typical_range", [])
+        typical = f"¥{tr[0]:,}〜¥{tr[1]:,}" if len(tr) == 2 else "—"
+
+        # セール・プロモーションタグ
+        promo_html = ""
+        for tag in d.get("promo_tags", []):
+            promo_html += f"<br><span style='color:orange;font-size:11px'>🏷 {tag}</span>"
+
         rows += (
             f"<tr>"
             f"<td>{d['depart_date']}</td>"
             f"<td>{d['return_date']}</td>"
             f"<td>{d['nights']}泊</td>"
             f"{price_cell}"
+            f"<td>{level_label}</td>"
+            f"<td>{typical}</td>"
             f"<td>{low}</td>"
             f"<td>{avg}</td>"
-            f"<td>{d['airline']}</td>"
+            f"<td>{d['airline']}{promo_html}</td>"
             f"<td><a href='{d['deep_link']}'>検索</a></td>"
             f"</tr>"
         )
@@ -246,15 +295,16 @@ def _email_table(rows_html: str, threshold: int) -> str:
         "<html><body style='font-family:sans-serif'>"
         "<h2>✈️ ソウル格安便が見つかりました</h2>"
         f"<p>設定閾値: <strong>¥{threshold:,}</strong> 以下　"
-        f"<span style='color:red'>★ = 過去最安値</span></p>"
+        "<span style='color:red'>★ = 過去最安値</span></p>"
         "<table border='1' cellpadding='6' cellspacing='0' style='border-collapse:collapse;font-size:14px'>"
         "<thead style='background:#f0f0f0'><tr>"
         "<th>出発日</th><th>帰国日</th><th>泊数</th>"
-        "<th>現在価格</th><th>底値</th><th>平均価格</th>"
+        "<th>現在価格</th><th>価格レベル</th><th>典型価格帯</th>"
+        "<th>底値</th><th>平均価格</th>"
         "<th>航空会社</th><th>リンク</th>"
         f"</tr></thead><tbody>{rows_html}</tbody></table>"
         "<p style='color:gray;font-size:11px;margin-top:16px'>"
-        "底値・平均は本ツールの計測開始以降の履歴に基づきます。"
+        "価格レベル・典型価格帯はGoogle Flights提供。底値・平均は計測開始以降の履歴。"
         "Seoul Flight Checker が自動送信しました</p>"
         "</body></html>"
     )
@@ -272,12 +322,16 @@ def send_test_email():
             "nights": 4, "price_jpy": 38500, "airline": "Jeju Air",
             "deep_link": "https://www.google.com/travel/flights",
             "stats": {"low": 38500, "avg": 45200, "count": 12},
+            "price_level": "low", "typical_range": [42000, 68000],
+            "promo_tags": ["Summer Sale -20%"],
         },
         {
             "depart_date": "2026-07-11", "return_date": "2026-07-14",
             "nights": 3, "price_jpy": 42000, "airline": "T'way Air",
             "deep_link": "https://www.google.com/travel/flights",
             "stats": {"low": 41000, "avg": 47800, "count": 8},
+            "price_level": "typical", "typical_range": [40000, 62000],
+            "promo_tags": [],
         },
     ]
     rows = _deal_rows_html(sample_deals)
@@ -337,6 +391,7 @@ def run_check():
     today = date.today()
     deals_found = []
 
+    cleanup_old_records()
     log.info("=== チェック開始: %s → %s (閾値 ¥%s) ===", origin, DESTINATION, f"{threshold:,}")
 
     for days_out in range(7, days_ahead + 1, 7):          # 1週間刻みで検索
