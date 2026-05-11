@@ -430,12 +430,148 @@ def run_check():
     log.info("=== チェック完了 ===")
 
 
+# ── HTMLレポート ──────────────────────────────────────────────────────────────
+
+def generate_report(out_path: str = "index.html"):
+    """prices.db から最新価格一覧の index.html を生成する。"""
+    today = datetime.now().strftime("%Y-%m-%d %H:%M JST")
+    threshold = int(os.environ.get("PRICE_THRESHOLD", 50000))
+
+    with sqlite3.connect(DB_PATH) as conn:
+        # 各フライト(出発日・帰着日)の最新チェック価格・底値・平均を取得
+        rows = conn.execute("""
+            SELECT
+                h.depart_date,
+                h.return_date,
+                CAST(julianday(h.return_date) - julianday(h.depart_date) AS INTEGER) AS nights,
+                h.price_jpy    AS latest_price,
+                h.airline,
+                h.deep_link,
+                stats.low_price,
+                stats.avg_price,
+                stats.samples
+            FROM price_history h
+            JOIN (
+                SELECT depart_date, return_date,
+                       MIN(price_jpy)  AS low_price,
+                       ROUND(AVG(price_jpy)) AS avg_price,
+                       COUNT(*)        AS samples,
+                       MAX(checked_at) AS latest_at
+                FROM price_history
+                WHERE origin=? AND destination=?
+                  AND depart_date >= date('now')
+                GROUP BY depart_date, return_date
+            ) stats ON h.depart_date=stats.depart_date
+                   AND h.return_date=stats.return_date
+                   AND h.checked_at=stats.latest_at
+                   AND h.origin=? AND h.destination=?
+            ORDER BY h.price_jpy ASC
+        """, (
+            os.environ.get("ORIGIN", "TYO"), DESTINATION,
+            os.environ.get("ORIGIN", "TYO"), DESTINATION,
+        )).fetchall()
+
+    def price_class(price):
+        if price <= threshold:           return "deal"
+        if price <= threshold * 1.2:     return "near"
+        return "normal"
+
+    tbody = ""
+    for depart, ret, nights, price, airline, link, low, avg, samples in rows:
+        cls     = price_class(price)
+        low_str = f"¥{low:,}" if low else "—"
+        avg_str = f"¥{avg:,}" if avg else "—"
+        star    = " ★" if low and price <= low else ""
+        tbody += (
+            f"<tr class='{cls}'>"
+            f"<td>{depart}</td><td>{ret}</td><td>{nights}泊</td>"
+            f"<td class='price'>¥{price:,}{star}</td>"
+            f"<td>{low_str}</td><td>{avg_str}</td>"
+            f"<td>{samples}</td><td>{airline}</td>"
+            f"<td><a href='{link}' target='_blank'>検索</a></td>"
+            f"</tr>"
+        )
+
+    html = f"""<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>✈️ ソウル航空券 最安値一覧</title>
+<style>
+  body {{ font-family: sans-serif; max-width: 1000px; margin: 0 auto; padding: 16px; background: #f9f9f9; }}
+  h1 {{ font-size: 1.4rem; }}
+  .meta {{ color: #666; font-size: .85rem; margin-bottom: 12px; }}
+  table {{ width: 100%; border-collapse: collapse; background: #fff; font-size: .9rem; }}
+  th {{ background: #333; color: #fff; padding: 8px 10px; text-align: left; cursor: pointer; }}
+  th:hover {{ background: #555; }}
+  td {{ padding: 7px 10px; border-bottom: 1px solid #eee; }}
+  tr.deal td {{ background: #e8f5e9; }}
+  tr.near td {{ background: #fff9e6; }}
+  tr:hover td {{ filter: brightness(.95); }}
+  .price {{ font-weight: bold; }}
+  tr.deal .price {{ color: #c00; }}
+  tr.near .price {{ color: #e65; }}
+  .legend {{ font-size: .8rem; margin-top: 8px; color: #555; }}
+  input#filter {{ margin-bottom: 10px; padding: 6px; width: 200px; border: 1px solid #ccc; border-radius: 4px; }}
+</style>
+</head>
+<body>
+<h1>✈️ ソウル航空券 最安値一覧</h1>
+<div class="meta">最終更新: {today} ／ 閾値: ¥{threshold:,}
+  <span style="margin-left:12px">🟩 閾値以下 &nbsp; 🟨 閾値の1.2倍以内</span>
+</div>
+<input id="filter" type="text" placeholder="航空会社・日付で絞込…" oninput="filterTable(this.value)">
+<table id="tbl">
+<thead><tr>
+  <th onclick="sort(0)">出発日 ↕</th>
+  <th onclick="sort(1)">帰国日 ↕</th>
+  <th onclick="sort(2)">泊数 ↕</th>
+  <th onclick="sort(3)">現在価格 ↕</th>
+  <th onclick="sort(4)">底値 ↕</th>
+  <th onclick="sort(5)">平均 ↕</th>
+  <th onclick="sort(6)">記録数 ↕</th>
+  <th onclick="sort(7)">航空会社 ↕</th>
+  <th>リンク</th>
+</tr></thead>
+<tbody>{tbody}</tbody>
+</table>
+<div class="legend">★ = 過去最安値更新 ／ 底値・平均はツール計測開始以降の履歴</div>
+<script>
+let asc = {{}};
+function sort(col) {{
+  const tb = document.querySelector('#tbl tbody');
+  const rows = [...tb.rows];
+  asc[col] = !asc[col];
+  rows.sort((a, b) => {{
+    let av = a.cells[col].innerText.replace(/[¥,★]/g,'').trim();
+    let bv = b.cells[col].innerText.replace(/[¥,★]/g,'').trim();
+    const an = parseFloat(av), bn = parseFloat(bv);
+    const cmp = isNaN(an) ? av.localeCompare(bv, 'ja') : an - bn;
+    return asc[col] ? cmp : -cmp;
+  }});
+  rows.forEach(r => tb.appendChild(r));
+}}
+function filterTable(q) {{
+  q = q.toLowerCase();
+  for (const r of document.querySelectorAll('#tbl tbody tr'))
+    r.style.display = r.innerText.toLowerCase().includes(q) ? '' : 'none';
+}}
+</script>
+</body>
+</html>"""
+
+    with open(out_path, "w", encoding="utf-8") as f:
+        f.write(html)
+    log.info("レポートを生成しました: %s (%d件)", out_path, len(rows))
+
+
 # ── エントリーポイント ──────────────────────────────────────────────────────────
 
 def main():
     parser = argparse.ArgumentParser(description="Seoul Flight Price Checker")
-    parser.add_argument("--test", action="store_true",
-                        help="メール設定の疎通確認用テストメールを送信して終了")
+    parser.add_argument("--test",   action="store_true", help="テストメール送信")
+    parser.add_argument("--report", action="store_true", help="index.html を生成して終了")
     args = parser.parse_args()
 
     _validate_env(require_serpapi=not args.test)
@@ -443,6 +579,10 @@ def main():
 
     if args.test:
         send_test_email()
+        return
+
+    if args.report:
+        generate_report()
         return
 
     # 最適チェック時刻をログに記録（参考情報）
