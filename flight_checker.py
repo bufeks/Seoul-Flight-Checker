@@ -574,16 +574,18 @@ def main():
     parser.add_argument("--report", action="store_true", help="index.html を生成して終了")
     args = parser.parse_args()
 
-    _validate_env(require_serpapi=not args.test)
     init_db()
 
     if args.test:
+        _validate_env(require_serpapi=False)
         send_test_email()
         return
 
     if args.report:
         generate_report()
         return
+
+    _validate_env(require_serpapi=True)
 
     # 最適チェック時刻をログに記録（参考情報）
     check_times = analyze_best_check_times()
