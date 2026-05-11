@@ -61,15 +61,16 @@ jobs:
         if: ${{ inputs.send_test_email != true }}
         env:
           PRICE_THRESHOLD: ${{ vars.PRICE_THRESHOLD || '50000' }}
-        run: python flight_checker.py --report
+        run: |
+          mkdir -p public
+          python flight_checker.py --report public/index.html
 
       - name: Deploy to GitHub Pages
         if: ${{ inputs.send_test_email != true }}
         uses: peaceiris/actions-gh-pages@v4
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_dir: .
-          include_files: index.html
+          publish_dir: ./public
           commit_message: "Update flight price report"
 
       - name: Upload log

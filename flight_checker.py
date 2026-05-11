@@ -571,7 +571,8 @@ function filterTable(q) {{
 def main():
     parser = argparse.ArgumentParser(description="Seoul Flight Price Checker")
     parser.add_argument("--test",   action="store_true", help="テストメール送信")
-    parser.add_argument("--report", action="store_true", help="index.html を生成して終了")
+    parser.add_argument("--report", metavar="OUT", nargs="?", const="index.html",
+                        help="HTML レポートを生成して終了 (デフォルト: index.html)")
     args = parser.parse_args()
 
     init_db()
@@ -582,7 +583,7 @@ def main():
         return
 
     if args.report:
-        generate_report()
+        generate_report(args.report)
         return
 
     _validate_env(require_serpapi=True)
