@@ -52,7 +52,8 @@ jobs:
           SMTP_USER:        ${{ secrets.SMTP_USER }}
           SMTP_PASS:        ${{ secrets.SMTP_PASS }}
           ALERT_TO:         ${{ secrets.ALERT_TO }}
-          PRICE_THRESHOLD:  ${{ vars.PRICE_THRESHOLD || '50000' }}
+          THRESHOLD_GREAT:  ${{ vars.THRESHOLD_GREAT || '18000' }}
+          THRESHOLD_BUY:    ${{ vars.THRESHOLD_BUY || '25000' }}
           DAYS_AHEAD:       ${{ vars.DAYS_AHEAD || '90' }}
           TRIP_DURATIONS:   ${{ vars.TRIP_DURATIONS || '3,4,5,7' }}
         run: python flight_checker.py
@@ -60,7 +61,8 @@ jobs:
       - name: Generate HTML report
         if: ${{ inputs.send_test_email != true }}
         env:
-          PRICE_THRESHOLD: ${{ vars.PRICE_THRESHOLD || '50000' }}
+          THRESHOLD_GREAT: ${{ vars.THRESHOLD_GREAT || '18000' }}
+          THRESHOLD_BUY:   ${{ vars.THRESHOLD_BUY || '25000' }}
         run: |
           mkdir -p public
           python flight_checker.py --report public/index.html

@@ -261,14 +261,17 @@ def _deal_rows_html(deals: list[dict]) -> str:
             f"¥{d['price_jpy']:,}{'&nbsp;★' if is_hist_low else ''}</td>"
         )
 
-        # Google Flights 価格レベル
-        level_label = PRICE_LEVEL_LABEL.get(d.get("price_level", ""), "")
+        tier = d.get("tier", "buy")
+        tier_cell = (
+            "<td style='color:#c00;font-weight:bold'>🔥 かなり安い</td>"
+            if tier == "great" else
+            "<td style='color:#2a7;font-weight:bold'>✅ 買いライン</td>"
+        )
 
-        # 典型価格帯
+        level_label = PRICE_LEVEL_LABEL.get(d.get("price_level", ""), "")
         tr = d.get("typical_range", [])
         typical = f"¥{tr[0]:,}〜¥{tr[1]:,}" if len(tr) == 2 else "—"
 
-        # セール・プロモーションタグ
         promo_html = ""
         for tag in d.get("promo_tags", []):
             promo_html += f"<br><span style='color:orange;font-size:11px'>🏷 {tag}</span>"
@@ -279,6 +282,7 @@ def _deal_rows_html(deals: list[dict]) -> str:
             f"<td>{d['return_date']}</td>"
             f"<td>{d['nights']}泊</td>"
             f"{price_cell}"
+            f"{tier_cell}"
             f"<td>{level_label}</td>"
             f"<td>{typical}</td>"
             f"<td>{low}</td>"
@@ -290,16 +294,17 @@ def _deal_rows_html(deals: list[dict]) -> str:
     return rows
 
 
-def _email_table(rows_html: str, threshold: int) -> str:
+def _email_table(rows_html: str, threshold_great: int, threshold_buy: int) -> str:
     return (
         "<html><body style='font-family:sans-serif'>"
         "<h2>✈️ ソウル格安便が見つかりました</h2>"
-        f"<p>設定閾値: <strong>¥{threshold:,}</strong> 以下　"
+        f"<p>🔥 かなり安い: <strong>¥{threshold_great:,}以下</strong> ／ "
+        f"✅ 買いライン: <strong>¥{threshold_buy:,}以下</strong>　"
         "<span style='color:red'>★ = 過去最安値</span></p>"
         "<table border='1' cellpadding='6' cellspacing='0' style='border-collapse:collapse;font-size:14px'>"
         "<thead style='background:#f0f0f0'><tr>"
         "<th>出発日</th><th>帰国日</th><th>泊数</th>"
-        "<th>現在価格</th><th>価格レベル</th><th>典型価格帯</th>"
+        "<th>現在価格</th><th>ランク</th><th>価格レベル</th><th>典型価格帯</th>"
         "<th>底値</th><th>平均価格</th>"
         "<th>航空会社</th><th>リンク</th>"
         f"</tr></thead><tbody>{rows_html}</tbody></table>"
@@ -311,27 +316,29 @@ def _email_table(rows_html: str, threshold: int) -> str:
 
 
 def send_test_email():
-    alert_to  = os.environ["ALERT_TO"]
-    smtp_user = os.environ["SMTP_USER"]
-    threshold = int(os.environ.get("PRICE_THRESHOLD", 50000))
+    alert_to         = os.environ["ALERT_TO"]
+    smtp_user        = os.environ["SMTP_USER"]
+    threshold_great  = int(os.environ.get("THRESHOLD_GREAT", 18000))
+    threshold_buy    = int(os.environ.get("THRESHOLD_BUY",   25000))
 
-    # 実際のアラートメールと同じレイアウトでサンプルデータを表示
     sample_deals = [
         {
             "depart_date": "2026-07-04", "return_date": "2026-07-08",
-            "nights": 4, "price_jpy": 38500, "airline": "Jeju Air",
+            "nights": 4, "price_jpy": 16800, "airline": "Jeju Air",
             "deep_link": "https://www.google.com/travel/flights",
-            "stats": {"low": 38500, "avg": 45200, "count": 12},
-            "price_level": "low", "typical_range": [42000, 68000],
+            "stats": {"low": 16800, "avg": 28500, "count": 12},
+            "price_level": "low", "typical_range": [22000, 38000],
             "promo_tags": ["Summer Sale -20%"],
+            "tier": "great",
         },
         {
             "depart_date": "2026-07-11", "return_date": "2026-07-14",
-            "nights": 3, "price_jpy": 42000, "airline": "T'way Air",
+            "nights": 3, "price_jpy": 23400, "airline": "T'way Air",
             "deep_link": "https://www.google.com/travel/flights",
-            "stats": {"low": 41000, "avg": 47800, "count": 8},
-            "price_level": "typical", "typical_range": [40000, 62000],
+            "stats": {"low": 21000, "avg": 31200, "count": 8},
+            "price_level": "typical", "typical_range": [20000, 35000],
             "promo_tags": [],
+            "tier": "buy",
         },
     ]
     rows = _deal_rows_html(sample_deals)
@@ -339,7 +346,7 @@ def send_test_email():
         "<html><body style='font-family:sans-serif'>"
         "<h2>✈️ Seoul Flight Checker — 接続テスト</h2>"
         "<p>メール通知の設定は正常です。実際のアラートはこのような形式で届きます（以下はサンプルデータ）。</p>"
-        + _email_table(rows, threshold).replace("<html><body style='font-family:sans-serif'>", "")
+        + _email_table(rows, threshold_great, threshold_buy).replace("<html><body style='font-family:sans-serif'>", "")
     )
 
     msg = MIMEMultipart("alternative")
@@ -356,13 +363,17 @@ def send_test_email():
         server.quit()
 
 
-def send_alert_email(deals: list[dict]):
+def send_alert_email(deals: list[dict], threshold_great: int, threshold_buy: int):
     alert_to  = os.environ["ALERT_TO"]
-    threshold = int(os.environ.get("PRICE_THRESHOLD", 50000))
+    great_cnt = sum(1 for d in deals if d.get("tier") == "great")
+    buy_cnt   = len(deals) - great_cnt
+    parts = []
+    if great_cnt: parts.append(f"🔥かなり安い {great_cnt}件")
+    if buy_cnt:   parts.append(f"✅買いライン {buy_cnt}件")
+    subject = f"✈️ ソウル格安便！ {' / '.join(parts)}"
 
-    subject = f"✈️ ソウル格安便アラート！ {len(deals)}件 ¥{threshold:,}以下"
-    rows    = _deal_rows_html(deals)
-    body_html = _email_table(rows, threshold)
+    rows      = _deal_rows_html(deals)
+    body_html = _email_table(rows, threshold_great, threshold_buy)
 
     msg = MIMEMultipart("alternative")
     msg["Subject"] = subject
@@ -383,18 +394,20 @@ def send_alert_email(deals: list[dict]):
 # ── メインチェック ────────────────────────────────────────────────────────────
 
 def run_check():
-    origin    = os.environ.get("ORIGIN", "TYO")
-    days_ahead = int(os.environ.get("DAYS_AHEAD", 90))
-    threshold  = int(os.environ.get("PRICE_THRESHOLD", 50000))
-    durations  = [int(d) for d in os.environ.get("TRIP_DURATIONS", "3,4,5,7").split(",")]
+    origin          = os.environ.get("ORIGIN", "TYO")
+    days_ahead      = int(os.environ.get("DAYS_AHEAD", 90))
+    threshold_great = int(os.environ.get("THRESHOLD_GREAT", 18000))
+    threshold_buy   = int(os.environ.get("THRESHOLD_BUY",   25000))
+    durations       = [int(d) for d in os.environ.get("TRIP_DURATIONS", "3,4,5,7").split(",")]
 
     today = date.today()
     deals_found = []
 
     cleanup_old_records()
-    log.info("=== チェック開始: %s → %s (閾値 ¥%s) ===", origin, DESTINATION, f"{threshold:,}")
+    log.info("=== チェック開始: %s → %s (🔥¥%s / ✅¥%s) ===",
+             origin, DESTINATION, f"{threshold_great:,}", f"{threshold_buy:,}")
 
-    for days_out in range(7, days_ahead + 1, 7):          # 1週間刻みで検索
+    for days_out in range(7, days_ahead + 1, 7):
         depart = today + timedelta(days=days_out)
         for nights in durations:
             ret = depart + timedelta(days=nights)
@@ -408,20 +421,21 @@ def run_check():
 
             save_price(origin, DESTINATION, depart, ret, price, airline, deep_link)
 
-            stats       = get_price_stats(origin, DESTINATION, depart, ret)
-            is_new_low  = stats["low"] and price < stats["low"]
+            stats      = get_price_stats(origin, DESTINATION, depart, ret)
+            is_new_low = stats["low"] and price < stats["low"]
 
             flag = " ★最安値更新!" if is_new_low else ""
             log.info("  %s → %s (%d泊) ¥%s [%s]%s",
                      depart, ret, nights, f"{price:,}", airline, flag)
 
-            if price <= threshold:
-                deals_found.append({**result, "nights": nights, "stats": stats})
+            if price <= threshold_buy:
+                tier = "great" if price <= threshold_great else "buy"
+                deals_found.append({**result, "nights": nights, "stats": stats, "tier": tier})
 
     if deals_found:
         log.info("閾値以下の便が %d 件見つかりました。", len(deals_found))
         if _email_configured():
-            send_alert_email(deals_found)
+            send_alert_email(deals_found, threshold_great, threshold_buy)
         else:
             log.warning("メール未設定のため通知をスキップ。.env に SMTP_USER/SMTP_PASS/ALERT_TO を追加してください。")
     else:
@@ -434,8 +448,9 @@ def run_check():
 
 def generate_report(out_path: str = "index.html"):
     """prices.db から最新価格一覧の index.html を生成する。"""
-    today = datetime.now().strftime("%Y-%m-%d %H:%M JST")
-    threshold = int(os.environ.get("PRICE_THRESHOLD", 50000))
+    today           = datetime.now().strftime("%Y-%m-%d %H:%M JST")
+    threshold_great = int(os.environ.get("THRESHOLD_GREAT", 18000))
+    threshold_buy   = int(os.environ.get("THRESHOLD_BUY",   25000))
 
     with sqlite3.connect(DB_PATH) as conn:
         # 各フライト(出発日・帰着日)の最新チェック価格・底値・平均を取得
@@ -472,8 +487,9 @@ def generate_report(out_path: str = "index.html"):
         )).fetchall()
 
     def price_class(price):
-        if price <= threshold:           return "deal"
-        if price <= threshold * 1.2:     return "near"
+        if price <= threshold_great:          return "great"
+        if price <= threshold_buy:            return "deal"
+        if price <= threshold_buy * 1.2:      return "near"
         return "normal"
 
     tbody = ""
@@ -506,11 +522,13 @@ def generate_report(out_path: str = "index.html"):
   th {{ background: #333; color: #fff; padding: 8px 10px; text-align: left; cursor: pointer; }}
   th:hover {{ background: #555; }}
   td {{ padding: 7px 10px; border-bottom: 1px solid #eee; }}
+  tr.great td {{ background: #fde8e8; }}
   tr.deal td {{ background: #e8f5e9; }}
   tr.near td {{ background: #fff9e6; }}
   tr:hover td {{ filter: brightness(.95); }}
   .price {{ font-weight: bold; }}
-  tr.deal .price {{ color: #c00; }}
+  tr.great .price {{ color: #c00; font-weight: bold; }}
+  tr.deal .price {{ color: #2a7; }}
   tr.near .price {{ color: #e65; }}
   .legend {{ font-size: .8rem; margin-top: 8px; color: #555; }}
   input#filter {{ margin-bottom: 10px; padding: 6px; width: 200px; border: 1px solid #ccc; border-radius: 4px; }}
@@ -518,8 +536,8 @@ def generate_report(out_path: str = "index.html"):
 </head>
 <body>
 <h1>✈️ ソウル航空券 最安値一覧</h1>
-<div class="meta">最終更新: {today} ／ 閾値: ¥{threshold:,}
-  <span style="margin-left:12px">🟩 閾値以下 &nbsp; 🟨 閾値の1.2倍以内</span>
+<div class="meta">最終更新: {today}
+  <span style="margin-left:12px">🔴 かなり安い(¥{threshold_great:,}以下) &nbsp; 🟩 買いライン(¥{threshold_buy:,}以下) &nbsp; 🟨 参考(¥{int(threshold_buy*1.2):,}以内)</span>
 </div>
 <input id="filter" type="text" placeholder="航空会社・日付で絞込…" oninput="filterTable(this.value)">
 <table id="tbl">
@@ -536,7 +554,7 @@ def generate_report(out_path: str = "index.html"):
 </tr></thead>
 <tbody>{tbody}</tbody>
 </table>
-<div class="legend">★ = 過去最安値更新 ／ 底値・平均はツール計測開始以降の履歴</div>
+<div class="legend">★ = 過去最安値更新 ／ 🔴かなり安い(¥{threshold_great:,}以下) ／ 🟩買いライン(¥{threshold_buy:,}以下) ／ 底値・平均はツール計測開始以降の履歴</div>
 <script>
 let asc = {{}};
 function sort(col) {{
