@@ -1,14 +1,8 @@
-name: Seoul Flight Check — 直前（7〜21日後）
+name: Seoul Flight Check — 早割（60〜150日後）
 
 on:
   schedule:
-    - cron: "0 22 * * 0,3"   # 月・木 07:00 JST (UTC日・水 22:00)
-  workflow_dispatch:
-    inputs:
-      send_test_email:
-        description: 'テストメールを送信する'
-        type: boolean
-        default: false
+    - cron: "0 22 1,15 * *"   # 毎月1日・15日 07:00 JST
 
 jobs:
   check:
@@ -36,16 +30,7 @@ jobs:
           restore-keys: |
             prices-db-
 
-      - name: Send test email
-        if: ${{ inputs.send_test_email == true }}
-        env:
-          SMTP_USER: ${{ secrets.SMTP_USER }}
-          SMTP_PASS: ${{ secrets.SMTP_PASS }}
-          ALERT_TO:  ${{ secrets.ALERT_TO }}
-        run: python flight_checker.py --test
-
-      - name: Run flight check
-        if: ${{ inputs.send_test_email != true }}
+      - name: Run early-bird check
         env:
           SERPAPI_KEY:     ${{ secrets.SERPAPI_KEY }}
           SMTP_USER:       ${{ secrets.SMTP_USER }}
@@ -53,14 +38,13 @@ jobs:
           ALERT_TO:        ${{ secrets.ALERT_TO }}
           THRESHOLD_GREAT: ${{ vars.THRESHOLD_GREAT || '18000' }}
           THRESHOLD_BUY:   ${{ vars.THRESHOLD_BUY || '25000' }}
-          DAYS_START:      "7"
-          DAYS_AHEAD:      "21"
-          DAYS_STEP:       "7"
-          TRIP_DURATIONS:  "3,5"
+          DAYS_START:      "60"
+          DAYS_AHEAD:      "150"
+          DAYS_STEP:       "14"
+          TRIP_DURATIONS:  "3,4,5"
         run: python flight_checker.py
 
       - name: Generate HTML report
-        if: ${{ inputs.send_test_email != true }}
         env:
           THRESHOLD_GREAT: ${{ vars.THRESHOLD_GREAT || '18000' }}
           THRESHOLD_BUY:   ${{ vars.THRESHOLD_BUY || '25000' }}
@@ -69,18 +53,17 @@ jobs:
           python flight_checker.py --report public/index.html
 
       - name: Deploy to GitHub Pages
-        if: ${{ inputs.send_test_email != true }}
         uses: peaceiris/actions-gh-pages@v4
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           publish_dir: ./public
           force_orphan: true
-          commit_message: "Update flight price report"
+          commit_message: "Update flight price report (early-bird)"
 
       - name: Upload log
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: flight-log-near-${{ github.run_number }}
+          name: flight-log-earlybird-${{ github.run_number }}
           path: flight_checker.log
           retention-days: 7

@@ -395,19 +395,22 @@ def send_alert_email(deals: list[dict], threshold_great: int, threshold_buy: int
 
 def run_check():
     origin          = os.environ.get("ORIGIN", "TYO")
-    days_ahead      = int(os.environ.get("DAYS_AHEAD", 90))
+    days_start      = int(os.environ.get("DAYS_START", 7))
+    days_ahead      = int(os.environ.get("DAYS_AHEAD", 21))
+    days_step       = int(os.environ.get("DAYS_STEP",  7))
     threshold_great = int(os.environ.get("THRESHOLD_GREAT", 18000))
     threshold_buy   = int(os.environ.get("THRESHOLD_BUY",   25000))
-    durations       = [int(d) for d in os.environ.get("TRIP_DURATIONS", "3,4,5,7").split(",")]
+    durations       = [int(d) for d in os.environ.get("TRIP_DURATIONS", "3,5").split(",")]
 
     today = date.today()
     deals_found = []
 
     cleanup_old_records()
-    log.info("=== チェック開始: %s → %s (🔥¥%s / ✅¥%s) ===",
-             origin, DESTINATION, f"{threshold_great:,}", f"{threshold_buy:,}")
+    log.info("=== チェック開始: %s → %s %d〜%d日後 step%d (🔥¥%s / ✅¥%s) ===",
+             origin, DESTINATION, days_start, days_ahead, days_step,
+             f"{threshold_great:,}", f"{threshold_buy:,}")
 
-    for days_out in range(7, days_ahead + 1, 7):
+    for days_out in range(days_start, days_ahead + 1, days_step):
         depart = today + timedelta(days=days_out)
         for nights in durations:
             ret = depart + timedelta(days=nights)
