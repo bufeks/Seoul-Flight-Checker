@@ -31,7 +31,7 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 DB_PATH = "prices.db"
-DESTINATION = "SEL"  # ソウル固定 (ICN/GMP)
+DESTINATION = "ICN"  # 仁川国際空港（ソウル固定）
 
 # 蓄積データが少ない間のデフォルト時刻
 # - 07:00: 前夜の需要変動をキャプチャ（LCCは深夜バッチで価格更新することが多い）
@@ -394,7 +394,7 @@ def send_alert_email(deals: list[dict], threshold_great: int, threshold_buy: int
 # ── メインチェック ────────────────────────────────────────────────────────────
 
 def run_check():
-    origin          = os.environ.get("ORIGIN", "TYO")
+    origin          = os.environ.get("ORIGIN", "NRT")
     days_start      = int(os.environ.get("DAYS_START", 7))
     days_ahead      = int(os.environ.get("DAYS_AHEAD", 21))
     days_step       = int(os.environ.get("DAYS_STEP",  7))
@@ -485,8 +485,8 @@ def generate_report(out_path: str = "index.html"):
                    AND h.origin=? AND h.destination=?
             ORDER BY h.price_jpy ASC
         """, (
-            os.environ.get("ORIGIN", "TYO"), DESTINATION,
-            os.environ.get("ORIGIN", "TYO"), DESTINATION,
+            os.environ.get("ORIGIN", "NRT"), DESTINATION,
+            os.environ.get("ORIGIN", "NRT"), DESTINATION,
         )).fetchall()
 
     def price_class(price):
