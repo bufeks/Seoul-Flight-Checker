@@ -67,29 +67,50 @@ def init_db():
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute("""
             CREATE TABLE IF NOT EXISTS price_history (
-                id          INTEGER PRIMARY KEY AUTOINCREMENT,
-                checked_at  TEXT    NOT NULL DEFAULT (datetime('now','localtime')),
-                origin      TEXT    NOT NULL,
-                destination TEXT    NOT NULL,
-                depart_date TEXT    NOT NULL,
-                return_date TEXT    NOT NULL,
-                price_jpy   INTEGER NOT NULL,
-                airline     TEXT,
-                deep_link   TEXT
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                checked_at    TEXT    NOT NULL DEFAULT (datetime('now','localtime')),
+                origin        TEXT    NOT NULL,
+                destination   TEXT    NOT NULL,
+                depart_date   TEXT    NOT NULL,
+                return_date   TEXT    NOT NULL,
+                price_jpy     INTEGER NOT NULL,
+                airline       TEXT,
+                deep_link     TEXT,
+                depart_time   TEXT,
+                arrive_time   TEXT,
+                duration_min  INTEGER,
+                flight_number TEXT,
+                is_direct     INTEGER DEFAULT 1
             )
         """)
+        # 既存テーブルへのカラム追加（マイグレーション）
+        for col, typedef in [
+            ("depart_time",   "TEXT"),
+            ("arrive_time",   "TEXT"),
+            ("duration_min",  "INTEGER"),
+            ("flight_number", "TEXT"),
+            ("is_direct",     "INTEGER DEFAULT 1"),
+        ]:
+            try:
+                conn.execute(f"ALTER TABLE price_history ADD COLUMN {col} {typedef}")
+            except sqlite3.OperationalError:
+                pass
         conn.commit()
 
 
-def save_price(origin, destination, depart_date, return_date, price_jpy, airline, deep_link):
+def save_price(origin, destination, depart_date, return_date, price_jpy, airline, deep_link,
+               depart_time=None, arrive_time=None, duration_min=None,
+               flight_number=None, is_direct=1):
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute(
             """INSERT INTO price_history
-               (origin, destination, depart_date, return_date, price_jpy, airline, deep_link)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+               (origin, destination, depart_date, return_date, price_jpy, airline, deep_link,
+                depart_time, arrive_time, duration_min, flight_number, is_direct)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (origin, destination,
              depart_date.isoformat(), return_date.isoformat(),
-             price_jpy, airline, deep_link),
+             price_jpy, airline, deep_link,
+             depart_time, arrive_time, duration_min, flight_number, is_direct),
         )
         conn.commit()
 
@@ -211,31 +232,51 @@ def fetch_cheapest_flight(origin: str, destination: str, depart_date: date, retu
     if price is None:
         return None
 
-    airline   = (cheapest.get("flights") or [{}])[0].get("airline", "不明")
+    out_legs  = cheapest.get("flights") or [{}]
+    first_leg = out_legs[0]
+    last_leg  = out_legs[-1]
+
+    airline   = first_leg.get("airline", "不明")
     deep_link = results.get("search_metadata", {}).get("google_flights_url", "")
 
-    # Google Flights の価格インサイト
-    insights      = results.get("price_insights", {})
-    price_level   = insights.get("price_level", "")          # "low" / "typical" / "high"
-    typical_range = insights.get("typical_price_range", [])  # [min, max]
+    # フライト時刻・所要時間
+    def _t(airport_dict):
+        t = (airport_dict or {}).get("time", "")
+        return t.split(" ")[-1] if t else ""   # "2026-06-12 08:00" → "08:00"
 
-    # セール・プロモーションタグ（flight extensions から抽出）
+    depart_time   = _t(first_leg.get("departure_airport"))
+    arrive_time   = _t(last_leg.get("arrival_airport"))
+    duration_min  = cheapest.get("total_duration")           # 分
+    flight_number = first_leg.get("flight_number", "")
+    is_direct     = not bool(cheapest.get("layovers"))
+
+    # Google Flights 価格インサイト
+    insights      = results.get("price_insights", {})
+    price_level   = insights.get("price_level", "")
+    typical_range = insights.get("typical_price_range", [])
+
+    # セール・プロモーションタグ
     sale_kws = {"sale", "promo", "deal", "special", "セール", "特価", "割引"}
     promo_tags = [
-        ext for f in (cheapest.get("flights") or [])
+        ext for f in out_legs
         for ext in (f.get("extensions") or [])
         if any(kw in ext.lower() for kw in sale_kws)
     ]
 
     return {
-        "price_jpy":    int(price),
-        "airline":      airline,
-        "deep_link":    deep_link,
-        "depart_date":  depart_date,
-        "return_date":  return_date,
-        "price_level":  price_level,
+        "price_jpy":     int(price),
+        "airline":       airline,
+        "deep_link":     deep_link,
+        "depart_date":   depart_date,
+        "return_date":   return_date,
+        "depart_time":   depart_time,
+        "arrive_time":   arrive_time,
+        "duration_min":  duration_min,
+        "flight_number": flight_number,
+        "is_direct":     is_direct,
+        "price_level":   price_level,
         "typical_range": typical_range,
-        "promo_tags":   promo_tags,
+        "promo_tags":    promo_tags,
     }
 
 
@@ -288,6 +329,20 @@ def _deal_rows_html(deals: list[dict]) -> str:
 
         dep_str = _fmt_date(d['depart_date'])
         ret_str = _fmt_date(d['return_date'])
+
+        # フライト詳細
+        dep_t = d.get("depart_time", "")
+        arr_t = d.get("arrive_time", "")
+        dur   = d.get("duration_min")
+        fno   = d.get("flight_number", "")
+        direct = d.get("is_direct", True)
+        time_str = f"{dep_t}→{arr_t}" if dep_t else "—"
+        dur_str  = f"{dur//60}h{dur%60:02d}m" if dur else "—"
+        direct_badge = (
+            "<span style='color:#2a7;font-size:11px'>✈直行</span>" if direct
+            else "<span style='color:#e65;font-size:11px'>🔄乗継</span>"
+        )
+
         rows += (
             f"<tr>"
             f"<td>{dep_str}</td>"
@@ -295,6 +350,7 @@ def _deal_rows_html(deals: list[dict]) -> str:
             f"<td>{d['nights']}泊</td>"
             f"{price_cell}"
             f"{tier_cell}"
+            f"<td>{time_str}<br><small>{dur_str} {direct_badge}</small><br><small style='color:#999'>{fno}</small></td>"
             f"<td>{level_label}</td>"
             f"<td>{typical}</td>"
             f"<td>{low}</td>"
@@ -316,7 +372,7 @@ def _email_table(rows_html: str, threshold_great: int, threshold_buy: int) -> st
         "<table border='1' cellpadding='6' cellspacing='0' style='border-collapse:collapse;font-size:14px'>"
         "<thead style='background:#f0f0f0'><tr>"
         "<th>出発日</th><th>帰国日</th><th>泊数</th>"
-        "<th>現在価格</th><th>ランク</th><th>価格レベル</th><th>典型価格帯</th>"
+        "<th>現在価格</th><th>ランク</th><th>時刻/所要時間</th><th>価格レベル</th><th>典型価格帯</th>"
         "<th>底値</th><th>平均価格</th>"
         "<th>航空会社</th><th>リンク</th>"
         f"</tr></thead><tbody>{rows_html}</tbody></table>"
@@ -446,7 +502,12 @@ def run_check():
             airline   = result["airline"]
             deep_link = result["deep_link"]
 
-            save_price(origin, DESTINATION, depart, ret, price, airline, deep_link)
+            save_price(origin, DESTINATION, depart, ret, price, airline, deep_link,
+                       depart_time=result.get("depart_time"),
+                       arrive_time=result.get("arrive_time"),
+                       duration_min=result.get("duration_min"),
+                       flight_number=result.get("flight_number"),
+                       is_direct=int(result.get("is_direct", True)))
 
             stats      = get_price_stats(origin, DESTINATION, depart, ret)
             is_new_low = stats["low"] and price < stats["low"]
@@ -491,7 +552,12 @@ def generate_report(out_path: str = "index.html"):
                 h.deep_link,
                 stats.low_price,
                 stats.avg_price,
-                stats.samples
+                stats.samples,
+                h.depart_time,
+                h.arrive_time,
+                h.duration_min,
+                h.flight_number,
+                h.is_direct
             FROM price_history h
             JOIN (
                 SELECT depart_date, return_date,
@@ -519,22 +585,31 @@ def generate_report(out_path: str = "index.html"):
         if price <= threshold_buy * 1.2:      return "near"
         return "normal"
 
+    def _day_cell(ds):
+        d = date.fromisoformat(ds)
+        w = WEEKDAY_JA[d.weekday()]
+        cls_map = {5: "sat", 6: "sun", 4: "fri"}
+        span = f"<span class='{cls_map[d.weekday()]}'>" if d.weekday() in cls_map else "<span>"
+        return f"<td>{d}{span}({w})</span></td>"
+
     tbody = ""
-    for depart, ret, nights, price, airline, link, low, avg, samples in rows:
+    for depart, ret, nights, price, airline, link, low, avg, samples, \
+        dep_t, arr_t, dur, fno, is_dir in rows:
         cls     = price_class(price)
         low_str = f"¥{low:,}" if low else "—"
         avg_str = f"¥{avg:,}" if avg else "—"
         star    = " ★" if low and price <= low else ""
-        def _day_cell(ds):
-            d = date.fromisoformat(ds)
-            w = WEEKDAY_JA[d.weekday()]
-            cls_map = {5: "sat", 6: "sun", 4: "fri"}
-            span = f"<span class='{cls_map[d.weekday()]}'>" if d.weekday() in cls_map else "<span>"
-            return f"<td>{d}{span}({w})</span></td>"
+
+        time_str  = f"{dep_t}→{arr_t}" if dep_t else "—"
+        dur_str   = f"{dur//60}h{dur%60:02d}m" if dur else "—"
+        dir_badge = "<span class='direct'>直行</span>" if is_dir else "<span class='transit'>乗継</span>"
+        fno_str   = f"<span class='fno'>{fno}</span>" if fno else ""
+
         tbody += (
             f"<tr class='{cls}'>"
             + _day_cell(depart) + _day_cell(ret) + f"<td>{nights}泊</td>"
             f"<td class='price'>¥{price:,}{star}</td>"
+            f"<td>{time_str}<br>{dur_str} {dir_badge}{fno_str}</td>"
             f"<td>{low_str}</td><td>{avg_str}</td>"
             f"<td>{samples}</td><td>{airline}</td>"
             f"<td><a href='{link}' target='_blank'>検索</a></td>"
@@ -566,6 +641,9 @@ def generate_report(out_path: str = "index.html"):
   .sat {{ color: #1565c0; font-weight: bold; }}
   .sun {{ color: #c62828; font-weight: bold; }}
   .fri {{ color: #e65100; }}
+  .direct {{ background:#e8f5e9; color:#2a7; border-radius:3px; padding:1px 4px; font-size:11px; }}
+  .transit {{ background:#fff3e0; color:#e65; border-radius:3px; padding:1px 4px; font-size:11px; }}
+  .fno {{ color:#999; font-size:11px; margin-left:4px; }}
   .legend {{ font-size: .8rem; margin-top: 8px; color: #555; }}
   input#filter {{ margin-bottom: 10px; padding: 6px; width: 200px; border: 1px solid #ccc; border-radius: 4px; }}
 </style>
@@ -582,10 +660,11 @@ def generate_report(out_path: str = "index.html"):
   <th onclick="sort(1)">帰国日 ↕</th>
   <th onclick="sort(2)">泊数 ↕</th>
   <th onclick="sort(3)">現在価格 ↕</th>
-  <th onclick="sort(4)">底値 ↕</th>
-  <th onclick="sort(5)">平均 ↕</th>
-  <th onclick="sort(6)">記録数 ↕</th>
-  <th onclick="sort(7)">航空会社 ↕</th>
+  <th onclick="sort(4)">時刻/所要時間 ↕</th>
+  <th onclick="sort(5)">底値 ↕</th>
+  <th onclick="sort(6)">平均 ↕</th>
+  <th onclick="sort(7)">記録数 ↕</th>
+  <th onclick="sort(8)">航空会社 ↕</th>
   <th>リンク</th>
 </tr></thead>
 <tbody>{tbody}</tbody>
