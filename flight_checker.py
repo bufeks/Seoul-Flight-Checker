@@ -50,6 +50,16 @@ PRICE_LEVEL_LABEL = {
     "high":    "🔴 割高",
 }
 
+WEEKDAY_JA = ["月", "火", "水", "木", "金", "土", "日"]
+
+
+def _fmt_date(d) -> str:
+    """'2026-06-14(日)' 形式に変換"""
+    if isinstance(d, str):
+        d = date.fromisoformat(d)
+    w = WEEKDAY_JA[d.weekday()]
+    return f"{d}({w})"
+
 
 # ── DB ──────────────────────────────────────────────────────────────────────
 
@@ -276,10 +286,12 @@ def _deal_rows_html(deals: list[dict]) -> str:
         for tag in d.get("promo_tags", []):
             promo_html += f"<br><span style='color:orange;font-size:11px'>🏷 {tag}</span>"
 
+        dep_str = _fmt_date(d['depart_date'])
+        ret_str = _fmt_date(d['return_date'])
         rows += (
             f"<tr>"
-            f"<td>{d['depart_date']}</td>"
-            f"<td>{d['return_date']}</td>"
+            f"<td>{dep_str}</td>"
+            f"<td>{ret_str}</td>"
             f"<td>{d['nights']}泊</td>"
             f"{price_cell}"
             f"{tier_cell}"
@@ -405,13 +417,25 @@ def run_check():
     today = date.today()
     deals_found = []
 
-    cleanup_old_records()
-    log.info("=== チェック開始: %s → %s %d〜%d日後 step%d (🔥¥%s / ✅¥%s) ===",
-             origin, DESTINATION, days_start, days_ahead, days_step,
-             f"{threshold_great:,}", f"{threshold_buy:,}")
+    # TARGET_WEEKDAYS が指定されていれば曜日指定、なければ step 刻み
+    target_wdays_str = os.environ.get("TARGET_WEEKDAYS", "")
+    if target_wdays_str:
+        target_wdays = set(int(x) for x in target_wdays_str.split(","))
+        depart_dates = [
+            today + timedelta(days=i)
+            for i in range(days_start, days_ahead + 1)
+            if (today + timedelta(days=i)).weekday() in target_wdays
+        ]
+        label = f"{days_start}〜{days_ahead}日後 曜日指定"
+    else:
+        depart_dates = [today + timedelta(days=i) for i in range(days_start, days_ahead + 1, days_step)]
+        label = f"{days_start}〜{days_ahead}日後 step{days_step}"
 
-    for days_out in range(days_start, days_ahead + 1, days_step):
-        depart = today + timedelta(days=days_out)
+    cleanup_old_records()
+    log.info("=== チェック開始: %s → %s %s (🔥¥%s / ✅¥%s) ===",
+             origin, DESTINATION, label, f"{threshold_great:,}", f"{threshold_buy:,}")
+
+    for depart in depart_dates:
         for nights in durations:
             ret = depart + timedelta(days=nights)
             result = fetch_cheapest_flight(origin, DESTINATION, depart, ret)
@@ -501,9 +525,15 @@ def generate_report(out_path: str = "index.html"):
         low_str = f"¥{low:,}" if low else "—"
         avg_str = f"¥{avg:,}" if avg else "—"
         star    = " ★" if low and price <= low else ""
+        def _day_cell(ds):
+            d = date.fromisoformat(ds)
+            w = WEEKDAY_JA[d.weekday()]
+            cls_map = {5: "sat", 6: "sun", 4: "fri"}
+            span = f"<span class='{cls_map[d.weekday()]}'>" if d.weekday() in cls_map else "<span>"
+            return f"<td>{d}{span}({w})</span></td>"
         tbody += (
             f"<tr class='{cls}'>"
-            f"<td>{depart}</td><td>{ret}</td><td>{nights}泊</td>"
+            + _day_cell(depart) + _day_cell(ret) + f"<td>{nights}泊</td>"
             f"<td class='price'>¥{price:,}{star}</td>"
             f"<td>{low_str}</td><td>{avg_str}</td>"
             f"<td>{samples}</td><td>{airline}</td>"
@@ -533,6 +563,9 @@ def generate_report(out_path: str = "index.html"):
   tr.great .price {{ color: #c00; font-weight: bold; }}
   tr.deal .price {{ color: #2a7; }}
   tr.near .price {{ color: #e65; }}
+  .sat {{ color: #1565c0; font-weight: bold; }}
+  .sun {{ color: #c62828; font-weight: bold; }}
+  .fri {{ color: #e65100; }}
   .legend {{ font-size: .8rem; margin-top: 8px; color: #555; }}
   input#filter {{ margin-bottom: 10px; padding: 6px; width: 200px; border: 1px solid #ccc; border-radius: 4px; }}
 </style>

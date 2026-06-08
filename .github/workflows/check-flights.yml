@@ -53,10 +53,10 @@ jobs:
           ALERT_TO:        ${{ secrets.ALERT_TO }}
           THRESHOLD_GREAT: ${{ vars.THRESHOLD_GREAT || '18000' }}
           THRESHOLD_BUY:   ${{ vars.THRESHOLD_BUY || '25000' }}
-          DAYS_START:      "7"
-          DAYS_AHEAD:      "21"
-          DAYS_STEP:       "7"
-          TRIP_DURATIONS:  "3,5"
+          DAYS_START:       "7"
+          DAYS_AHEAD:       "21"
+          TARGET_WEEKDAYS:  "4,5,6,0"
+          TRIP_DURATIONS:   "3,5"
         run: python flight_checker.py
 
       - name: Generate HTML report
