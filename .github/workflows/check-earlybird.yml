@@ -42,7 +42,7 @@ jobs:
           DAYS_START:      "60"
           DAYS_AHEAD:      "150"
           DAYS_STEP:       "14"
-          TRIP_DURATIONS:  "3,4,5"
+          TRIP_DURATIONS:  "2,3"
         run: python flight_checker.py
 
       - name: Generate HTML report
