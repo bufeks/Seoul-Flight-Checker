@@ -85,11 +85,17 @@ def init_db():
         """)
         # 既存テーブルへのカラム追加（マイグレーション）
         for col, typedef in [
-            ("depart_time",   "TEXT"),
-            ("arrive_time",   "TEXT"),
-            ("duration_min",  "INTEGER"),
-            ("flight_number", "TEXT"),
-            ("is_direct",     "INTEGER DEFAULT 1"),
+            ("depart_time",    "TEXT"),
+            ("arrive_time",    "TEXT"),
+            ("duration_min",   "INTEGER"),
+            ("flight_number",  "TEXT"),
+            ("is_direct",      "INTEGER DEFAULT 1"),
+            ("origin_ap",      "TEXT"),
+            ("dest_ap",        "TEXT"),
+            ("ret_depart_time","TEXT"),
+            ("ret_arrive_time","TEXT"),
+            ("ret_duration_min","INTEGER"),
+            ("ret_flight_number","TEXT"),
         ]:
             try:
                 conn.execute(f"ALTER TABLE price_history ADD COLUMN {col} {typedef}")
@@ -100,17 +106,24 @@ def init_db():
 
 def save_price(origin, destination, depart_date, return_date, price_jpy, airline, deep_link,
                depart_time=None, arrive_time=None, duration_min=None,
-               flight_number=None, is_direct=1):
+               flight_number=None, is_direct=1,
+               origin_ap=None, dest_ap=None,
+               ret_depart_time=None, ret_arrive_time=None,
+               ret_duration_min=None, ret_flight_number=None):
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute(
             """INSERT INTO price_history
                (origin, destination, depart_date, return_date, price_jpy, airline, deep_link,
-                depart_time, arrive_time, duration_min, flight_number, is_direct)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                depart_time, arrive_time, duration_min, flight_number, is_direct,
+                origin_ap, dest_ap,
+                ret_depart_time, ret_arrive_time, ret_duration_min, ret_flight_number)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (origin, destination,
              depart_date.isoformat(), return_date.isoformat(),
              price_jpy, airline, deep_link,
-             depart_time, arrive_time, duration_min, flight_number, is_direct),
+             depart_time, arrive_time, duration_min, flight_number, is_direct,
+             origin_ap, dest_ap,
+             ret_depart_time, ret_arrive_time, ret_duration_min, ret_flight_number),
         )
         conn.commit()
 
@@ -239,16 +252,34 @@ def fetch_cheapest_flight(origin: str, destination: str, depart_date: date, retu
     airline   = first_leg.get("airline", "不明")
     deep_link = results.get("search_metadata", {}).get("google_flights_url", "")
 
-    # フライト時刻・所要時間
     def _t(airport_dict):
         t = (airport_dict or {}).get("time", "")
         return t.split(" ")[-1] if t else ""   # "2026-06-12 08:00" → "08:00"
 
+    def _ap(airport_dict):
+        return (airport_dict or {}).get("id", "")
+
+    # 往路
     depart_time   = _t(first_leg.get("departure_airport"))
     arrive_time   = _t(last_leg.get("arrival_airport"))
-    duration_min  = cheapest.get("total_duration")           # 分
+    origin_ap     = _ap(first_leg.get("departure_airport"))
+    dest_ap       = _ap(last_leg.get("arrival_airport"))
+    duration_min  = cheapest.get("total_duration")
     flight_number = first_leg.get("flight_number", "")
     is_direct     = not bool(cheapest.get("layovers"))
+
+    # 復路（SerpAPIが返す場合）
+    ret_legs = cheapest.get("return_flights") or []
+    if ret_legs and isinstance(ret_legs, list):
+        ret_first = ret_legs[0] if isinstance(ret_legs[0], dict) else {}
+        ret_last  = ret_legs[-1] if isinstance(ret_legs[-1], dict) else {}
+        ret_depart_time   = _t(ret_first.get("departure_airport"))
+        ret_arrive_time   = _t(ret_last.get("arrival_airport"))
+        ret_duration_min  = sum(r.get("duration", 0) for r in ret_legs) or None
+        ret_flight_number = ret_first.get("flight_number", "")
+    else:
+        ret_depart_time = ret_arrive_time = ret_flight_number = ""
+        ret_duration_min = None
 
     # Google Flights 価格インサイト
     insights      = results.get("price_insights", {})
@@ -269,11 +300,17 @@ def fetch_cheapest_flight(origin: str, destination: str, depart_date: date, retu
         "deep_link":     deep_link,
         "depart_date":   depart_date,
         "return_date":   return_date,
-        "depart_time":   depart_time,
-        "arrive_time":   arrive_time,
-        "duration_min":  duration_min,
-        "flight_number": flight_number,
-        "is_direct":     is_direct,
+        "depart_time":      depart_time,
+        "arrive_time":      arrive_time,
+        "duration_min":     duration_min,
+        "flight_number":    flight_number,
+        "is_direct":        is_direct,
+        "origin_ap":        origin_ap,
+        "dest_ap":          dest_ap,
+        "ret_depart_time":  ret_depart_time,
+        "ret_arrive_time":  ret_arrive_time,
+        "ret_duration_min": ret_duration_min,
+        "ret_flight_number":ret_flight_number,
         "price_level":   price_level,
         "typical_range": typical_range,
         "promo_tags":    promo_tags,
@@ -331,17 +368,30 @@ def _deal_rows_html(deals: list[dict]) -> str:
         ret_str = _fmt_date(d['return_date'])
 
         # フライト詳細
-        dep_t = d.get("depart_time", "")
-        arr_t = d.get("arrive_time", "")
-        dur   = d.get("duration_min")
-        fno   = d.get("flight_number", "")
-        direct = d.get("is_direct", True)
-        time_str = f"{dep_t}→{arr_t}" if dep_t else "—"
-        dur_str  = f"{dur//60}h{dur%60:02d}m" if dur else "—"
+        orig_ap = d.get("origin_ap", "") or os.environ.get("ORIGIN", "NRT")
+        dest_ap = d.get("dest_ap", "") or DESTINATION
+        dep_t   = d.get("depart_time", "")
+        arr_t   = d.get("arrive_time", "")
+        dur     = d.get("duration_min")
+        fno     = d.get("flight_number", "")
+        direct  = d.get("is_direct", True)
+        ret_dep = d.get("ret_depart_time", "")
+        ret_arr = d.get("ret_arrive_time", "")
+        ret_dur = d.get("ret_duration_min")
+        ret_fno = d.get("ret_flight_number", "")
+
+        def _fc(ap_f, t_f, ap_t, t_t, dm, fn):
+            if not t_f: return "—"
+            d_str = f"{dm//60}h{dm%60:02d}m" if dm else ""
+            fn_s  = f" <span style='color:#999;font-size:11px'>{fn}</span>" if fn else ""
+            return f"<b>{ap_f}</b> {t_f}→<b>{ap_t}</b> {t_t} {d_str}{fn_s}"
+
         direct_badge = (
             "<span style='color:#2a7;font-size:11px'>✈直行</span>" if direct
             else "<span style='color:#e65;font-size:11px'>🔄乗継</span>"
         )
+        go_str  = _fc(orig_ap, dep_t, dest_ap, arr_t, dur, fno)
+        ret_str2 = _fc(dest_ap, ret_dep, orig_ap, ret_arr, ret_dur, ret_fno)
 
         rows += (
             f"<tr>"
@@ -350,7 +400,7 @@ def _deal_rows_html(deals: list[dict]) -> str:
             f"<td>{d['nights']}泊</td>"
             f"{price_cell}"
             f"{tier_cell}"
-            f"<td>{time_str}<br><small>{dur_str} {direct_badge}</small><br><small style='color:#999'>{fno}</small></td>"
+            f"<td>行: {go_str}<br>帰: {ret_str2}<br>{direct_badge}</td>"
             f"<td>{level_label}</td>"
             f"<td>{typical}</td>"
             f"<td>{low}</td>"
@@ -507,7 +557,13 @@ def run_check():
                        arrive_time=result.get("arrive_time"),
                        duration_min=result.get("duration_min"),
                        flight_number=result.get("flight_number"),
-                       is_direct=int(result.get("is_direct", True)))
+                       is_direct=int(result.get("is_direct", True)),
+                       origin_ap=result.get("origin_ap"),
+                       dest_ap=result.get("dest_ap"),
+                       ret_depart_time=result.get("ret_depart_time"),
+                       ret_arrive_time=result.get("ret_arrive_time"),
+                       ret_duration_min=result.get("ret_duration_min"),
+                       ret_flight_number=result.get("ret_flight_number"))
 
             stats      = get_price_stats(origin, DESTINATION, depart, ret)
             is_new_low = stats["low"] and price < stats["low"]
@@ -557,7 +613,13 @@ def generate_report(out_path: str = "index.html"):
                 h.arrive_time,
                 h.duration_min,
                 h.flight_number,
-                h.is_direct
+                h.is_direct,
+                COALESCE(h.origin_ap, ?) AS origin_ap,
+                COALESCE(h.dest_ap,   ?) AS dest_ap,
+                h.ret_depart_time,
+                h.ret_arrive_time,
+                h.ret_duration_min,
+                h.ret_flight_number
             FROM price_history h
             JOIN (
                 SELECT depart_date, return_date,
@@ -577,6 +639,10 @@ def generate_report(out_path: str = "index.html"):
         """, (
             os.environ.get("ORIGIN", "NRT"), DESTINATION,
             os.environ.get("ORIGIN", "NRT"), DESTINATION,
+        ), (
+            os.environ.get("ORIGIN", "NRT"), DESTINATION,
+            os.environ.get("ORIGIN", "NRT"), DESTINATION,
+            os.environ.get("ORIGIN", "NRT"), DESTINATION,
         )).fetchall()
 
     def price_class(price):
@@ -594,22 +660,32 @@ def generate_report(out_path: str = "index.html"):
 
     tbody = ""
     for depart, ret, nights, price, airline, link, low, avg, samples, \
-        dep_t, arr_t, dur, fno, is_dir in rows:
+        dep_t, arr_t, dur, fno, is_dir, orig_ap, dest_ap, \
+        ret_dep_t, ret_arr_t, ret_dur, ret_fno in rows:
         cls     = price_class(price)
         low_str = f"¥{low:,}" if low else "—"
         avg_str = f"¥{avg:,}" if avg else "—"
         star    = " ★" if low and price <= low else ""
 
-        time_str  = f"{dep_t}→{arr_t}" if dep_t else "—"
-        dur_str   = f"{dur//60}h{dur%60:02d}m" if dur else "—"
+        def _flight_cell(ap_from, t_from, ap_to, t_to, d_min, fn):
+            if not t_from:
+                return "—"
+            t   = f"<b>{ap_from}</b> {t_from} → <b>{ap_to}</b> {t_to}"
+            dur = f"{d_min//60}h{d_min%60:02d}m" if d_min else ""
+            fn2 = f"<span class='fno'>{fn}</span>" if fn else ""
+            return f"{t}<br><small>{dur} {fn2}</small>"
+
         dir_badge = "<span class='direct'>直行</span>" if is_dir else "<span class='transit'>乗継</span>"
-        fno_str   = f"<span class='fno'>{fno}</span>" if fno else ""
+        go_cell  = _flight_cell(orig_ap, dep_t, dest_ap, arr_t, dur, fno)
+        ret_cell = _flight_cell(dest_ap or DESTINATION, ret_dep_t,
+                                orig_ap or os.environ.get("ORIGIN","NRT"),
+                                ret_arr_t, ret_dur, ret_fno)
 
         tbody += (
             f"<tr class='{cls}'>"
             + _day_cell(depart) + _day_cell(ret) + f"<td>{nights}泊</td>"
             f"<td class='price'>¥{price:,}{star}</td>"
-            f"<td>{time_str}<br>{dur_str} {dir_badge}{fno_str}</td>"
+            f"<td>行き: {go_cell}<br>帰り: {ret_cell}<br>{dir_badge}</td>"
             f"<td>{low_str}</td><td>{avg_str}</td>"
             f"<td>{samples}</td><td>{airline}</td>"
             f"<td><a href='{link}' target='_blank'>検索</a></td>"
