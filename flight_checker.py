@@ -674,15 +674,12 @@ def generate_report(out_path: str = "index.html"):
 
         dir_badge = "<span class='direct'>直行</span>" if is_dir else "<span class='transit'>乗継</span>"
         go_cell  = _flight_cell(orig_ap, dep_t, dest_ap, arr_t, dur, fno)
-        ret_cell = _flight_cell(dest_ap or DESTINATION, ret_dep_t,
-                                orig_ap or os.environ.get("ORIGIN","NRT"),
-                                ret_arr_t, ret_dur, ret_fno)
 
         tbody += (
             f"<tr class='{cls}'>"
             + _day_cell(depart) + _day_cell(ret) + f"<td>{nights}泊</td>"
             f"<td class='price'>¥{price:,}{star}</td>"
-            f"<td>行き: {go_cell}<br>帰り: {ret_cell}<br>{dir_badge}</td>"
+            f"<td>{go_cell}<br>{dir_badge}</td>"
             f"<td>{low_str}</td><td>{avg_str}</td>"
             f"<td>{samples}</td><td>{airline}</td>"
             f"<td><a href='{link}' target='_blank'>検索</a></td>"
@@ -733,7 +730,7 @@ def generate_report(out_path: str = "index.html"):
   <th onclick="sort(1)">帰国日 ↕</th>
   <th onclick="sort(2)">泊数 ↕</th>
   <th onclick="sort(3)">現在価格 ↕</th>
-  <th onclick="sort(4)">時刻/所要時間 ↕</th>
+  <th onclick="sort(4)">行き時刻/所要時間 ↕</th>
   <th onclick="sort(5)">底値 ↕</th>
   <th onclick="sort(6)">平均 ↕</th>
   <th onclick="sort(7)">記録数 ↕</th>
