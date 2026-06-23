@@ -639,9 +639,6 @@ def generate_report(out_path: str = "index.html"):
         """, (
             os.environ.get("ORIGIN", "NRT"), DESTINATION,
             os.environ.get("ORIGIN", "NRT"), DESTINATION,
-        ), (
-            os.environ.get("ORIGIN", "NRT"), DESTINATION,
-            os.environ.get("ORIGIN", "NRT"), DESTINATION,
             os.environ.get("ORIGIN", "NRT"), DESTINATION,
         )).fetchall()
 
