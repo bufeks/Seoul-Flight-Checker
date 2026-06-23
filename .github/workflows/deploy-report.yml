@@ -1,0 +1,48 @@
+name: Deploy HTML Report
+
+on:
+  push:
+    branches:
+      - claude/korea-flight-price-finder-F2eOS
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Restore price history DB
+        uses: actions/cache@v4
+        with:
+          path: prices.db
+          key: prices-db-${{ github.run_id }}
+          restore-keys: |
+            prices-db-
+
+      - name: Generate HTML report
+        env:
+          THRESHOLD_GREAT: ${{ vars.THRESHOLD_GREAT || '18000' }}
+          THRESHOLD_BUY:   ${{ vars.THRESHOLD_BUY || '25000' }}
+        run: |
+          mkdir -p public
+          python flight_checker.py --report public/index.html
+
+      - name: Deploy to GitHub Pages
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./public
+          force_orphan: true
+          commit_message: "Update flight price report (code push)"
